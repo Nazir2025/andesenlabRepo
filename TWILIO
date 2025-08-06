@@ -1,0 +1,129 @@
+HTML
+<template>
+    <lightning-card title="WhatsApp Sender">
+        <div class="slds-p-around_medium">
+             <lightning-input 
+                label="Enter Phone Number"
+                data-id="msgInput"
+                placeholder="Type your Phone here">
+            </lightning-input>
+
+            <lightning-button 
+                variant="brand" 
+                label="Send Message" 
+                onclick={sendMessage}
+                class="slds-m-top_medium">
+            </lightning-button>
+        </div>
+    </lightning-card>
+</template>
+
+
+JAVASCRIPT
+
+import { LightningElement } from 'lwc';
+import sendTextMessage from '@salesforce/apex/TwillioWhatsapp.sendMessage';
+
+export default class TwillioWhatsApp extends LightningElement {
+
+    sendMessage() {
+        const msg = this.template.querySelector('[data-id="msgInput"]').value;
+      
+
+        if (!msg || msg.trim() === '') {
+            alert('Please enter a message and phone no.');
+            return;
+        }
+
+        sendTextMessage({ msg: msg})
+            .then(response => {
+                console.log('Response:', response);
+                alert('Message sent successfully!');
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error sending message.');
+            });
+    }
+}
+
+CALLOUT CLASS
+public class TwillioWhatsapp {
+
+    @AuraEnabled
+    public static String sendMessage(String msg) {
+        try {
+            if (String.isBlank(msg)) {
+                system.debug('MEssage recieved:: ::'+msg);
+                
+                throw new AuraHandledException('Message cannot be blank.');
+            }
+
+            String accountId = 'ACdff144658d36128237236e4c3042174b';
+            String authToken = 'fe9e994612cc13d9edcd51c40c60a861';
+            String fromNumber = '+14155238886';
+            String toNumber   = '+918830793622';
+
+            Http h = new Http();
+            HttpRequest req = new HttpRequest();
+
+            req.setEndpoint('https://api.twilio.com/2010-04-01/Accounts/' + accountId + '/Messages.json');
+            req.setMethod('POST');
+
+            // Set Authorization Header
+            Blob b = Blob.valueOf(accountId + ':' + authToken);
+            String authorizationHeader = 'Basic ' + EncodingUtil.base64Encode(b);
+            req.setHeader('Authorization', authorizationHeader);
+            req.setHeader('Content-Type', 'application/x-www-form-urlencoded');
+
+            // Set Body Parameters
+            String body = 'From=' + EncodingUtil.urlEncode('whatsapp:' + fromNumber, 'UTF-8');
+            body += '&To=' + EncodingUtil.urlEncode('whatsapp:' + toNumber, 'UTF-8');
+            body += '&Body=' + EncodingUtil.urlEncode(msg, 'UTF-8');
+            req.setBody(body);
+
+
+            // Send Request
+            HttpResponse res = h.send(req);
+            System.debug('Response::' + res.getBody());
+
+            return res.getBody(); // Optionally return Twilio response
+
+        } catch (Exception e) {
+            throw new AuraHandledException('Error sending message: ' + e.getMessage());
+        }
+    }
+}
+
+
+REST RESOURCE CLASS
+@RestResource(urlMapping='/twillo')
+global with sharing class NodeJsWebservice {
+//https://orgfarm-7589f08a3c-dev-ed.develop.my.salesforce.com/services/apexrest/twillo
+//https://orgfarm-7589f08a3c-dev-ed.develop.my.site.com/services/apexrest/twillo
+    @HttpPost
+    global static void doPost() {
+        RestRequest req = RestContext.request;
+        String requestBody = req.requestBody.toString();
+        System.debug('Received POST from TWILLIO:: ' + requestBody);
+        
+        // Parse JSON
+        Map<String, Object> data = (Map<String, Object>) JSON.deserializeUntyped(requestBody);
+
+        String businessPhone = (String) data.get('businessPhone');
+        String messageBody = (String) data.get('message');
+        String messageId = (String) data.get('messageId');
+        String waId = (String) data.get('customerPhone');
+
+        // Create record in WhatsApp__c
+        WhatsApp__c msg = new WhatsApp__c();
+        msg.Business_Phone_Number__c = businessPhone;
+        msg.Message__c = messageBody;
+        msg.Message_Id__c = messageId;
+        msg.Customer_Phone__c = waId;
+        msg.Agent_Name__c = UserInfo.getFirstName() + ' ' + UserInfo.getLastName();
+
+        insert msg;
+        system.debug('inserted data :'+msg);
+    }
+}
