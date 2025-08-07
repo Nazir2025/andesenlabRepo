@@ -1,0 +1,490 @@
+trigger ContentDocumentLinkTrigger on ContentDocumentLink (after insert, after update) {
+    if (!ContentDocumentLinkTriggerHandler.isTriggerEnabled()) {
+        return;
+    }
+
+    	List<ContentDocumentLink> caseLinks = new List<ContentDocumentLink>();
+    	for (ContentDocumentLink cdl : Trigger.new) {
+        if (String.valueOf(cdl.LinkedEntityId).startsWith('500')) {
+    
+
+            caseLinks.add(cdl);
+        }
+    }
+
+    // Run only if relevant CDL found (optional optimization)
+    if (!caseLinks.isEmpty()) {
+        new ContentDocumentLinkTriggerHandler(caseLinks).run();
+    }
+}
+
+======================================================================
+VIRTUAL CLASS
+
+public virtual class TriggerHandler {
+    
+     // static map of handlername, times run() was invoked
+     private static Map<String, LoopCount> loopCountMap;
+     private static Set<String> bypassedHandlers;
+    
+    // the current context of the trigger, overridable in tests
+    @TestVisible private TriggerContext context;
+    @TestVisible private Boolean isTriggerExecuting;
+    
+	// static initialization
+    static {
+        loopCountMap = new Map<String, LoopCount>();
+        bypassedHandlers = new Set<String>();
+    }
+	
+    // constructor
+    public TriggerHandler() {
+        this.setTriggerContext();
+    }
+	
+    // main method that will be called during execution
+    public void run() {
+        if (!validateRun()) return;
+        addToLoopCount();
+        
+		// dispatch to the correct handler method
+        switch on this.context {
+            when BEFORE_INSERT { this.beforeInsert();  }
+            when BEFORE_UPDATE { this.beforeUpdate();  }
+            when BEFORE_DELETE { this.beforeDelete();  }
+            when AFTER_INSERT  { this.afterInsert();   }
+            when AFTER_UPDATE  { this.afterUpdate();   }
+            when AFTER_DELETE  { this.afterDelete();   }
+            when AFTER_UNDELETE { this.afterUndelete();}
+        }
+    }
+
+    public void setMaxLoopCount(Integer max) {
+    String handlerName = getHandlerName();
+    if(!TriggerHandler.loopCountMap.containsKey(handlerName)) {
+      TriggerHandler.loopCountMap.put(handlerName, new LoopCount(max));
+    } else {
+      TriggerHandler.loopCountMap.get(handlerName).setMax(max);
+    }
+    }
+    
+      public void clearMaxLoopCount() {
+        this.setMaxLoopCount(-1);
+    }
+    
+	//public static methods
+    public static void bypass(String handlerName) {
+        bypassedHandlers.add(handlerName);
+    }
+    
+    public static void clearBypass(String handlerName) {
+        TriggerHandler.bypassedHandlers.remove(handlerName);
+    }
+    
+    public static Boolean isBypassed(String handlerName) {
+        return TriggerHandler.bypassedHandlers.contains(handlerName);
+    }
+    
+    public static void clearAllBypasses() {
+        TriggerHandler.bypassedHandlers.clear();
+    }
+    
+    //private instancemethods
+	@TestVisible
+    protected void setTriggerContext() {
+        this.setTriggerContext(null, false);
+    }
+  
+	@TestVisible
+    protected void setTriggerContext(String ctx, Boolean testMode) {
+        if (!Trigger.isExecuting && !testMode) {
+            this.isTriggerExecuting = false;
+            return;
+        }else {
+            this.isTriggerExecuting = true;
+        }
+
+        if ((Trigger.isExecuting && Trigger.isBefore && Trigger.isInsert) || (ctx == 'before insert')) {
+            this.context = TriggerContext.BEFORE_INSERT;
+        } else if ((Trigger.isExecuting && Trigger.isBefore && Trigger.isUpdate) || (ctx == 'before update')) {
+            this.context = TriggerContext.BEFORE_UPDATE;
+        } else if ((Trigger.isExecuting && Trigger.isBefore && Trigger.isDelete) || (ctx == 'before delete')) {
+            this.context = TriggerContext.BEFORE_DELETE;
+        } else if ((Trigger.isExecuting && Trigger.isAfter && Trigger.isInsert) || (ctx == 'after insert')) {
+            this.context = TriggerContext.AFTER_INSERT;
+        } else if ((Trigger.isExecuting && Trigger.isAfter && Trigger.isUpdate) || (ctx == 'after update')) {
+            this.context = TriggerContext.AFTER_UPDATE;
+        } else if ((Trigger.isExecuting && Trigger.isAfter && Trigger.isDelete) || (ctx == 'after delete')) {
+            this.context = TriggerContext.AFTER_DELETE;
+        } else if ((Trigger.isExecuting && Trigger.isAfter && Trigger.isUndelete) || (ctx == 'after undelete')) {
+            this.context = TriggerContext.AFTER_UNDELETE;
+        }
+    }
+    
+    // make sure this trigger should continue to run
+	@TestVisible
+    private Boolean validateRun() {
+        if (!this.isTriggerExecuting || this.context == null) {
+            throw new TriggerHandlerException('Trigger handler called outside of Trigger execution');
+        }
+        return !isBypassed(getHandlerName());
+    }
+    
+	// increment the loop count
+    private void addToLoopCount() {
+        String handlerName = getHandlerName();
+        if (loopCountMap.containsKey(handlerName)) {
+            Boolean exceeded = loopCountMap.get(handlerName).increment();
+            if (exceeded) {
+                Integer max = loopCountMap.get(handlerName).max;
+                throw new TriggerHandlerException('Maximum loop count of ' + max + ' reached in ' + handlerName);
+            }
+        }
+    }
+	@TestVisible
+    private String getHandlerName() {
+        return this.toString().substringBefore(':');
+    }
+
+    // context-specific methods for override
+     @TestVisible 
+    protected virtual void beforeInsert() {}
+     @TestVisible 
+    protected virtual void beforeUpdate() {}
+     @TestVisible 
+    protected virtual void beforeDelete() {}
+     @TestVisible 
+    protected virtual void afterInsert() {}
+     @TestVisible 
+    protected virtual void afterUpdate() {}
+     @TestVisible 
+    protected virtual void afterDelete() {}
+     @TestVisible 
+    protected virtual void afterUndelete() {}
+
+    // inner class for managing the loop count per handler
+    @TestVisible
+    private class LoopCount {
+        private Integer max;
+        private Integer count;
+        
+        public LoopCount() {
+            this.max = 5;
+            this.count = 0;
+        }
+        
+        public LoopCount(Integer max) {
+            this.max = max;
+            this.count = 0;
+        }
+        
+        public Boolean increment() {
+            this.count++;
+            return this.exceeded();
+        }
+        
+        public Boolean exceeded() {
+            return this.max >= 0 && this.count > this.max;
+        }
+        
+        public Integer getMax() {
+            return this.max;
+        }
+        
+        public Integer getCount() {
+            return this.count;
+        }
+        
+        public void setMax(Integer max) {
+            this.max = max;
+        }
+    }
+    // possible trigger contexts
+    @TestVisible
+    private enum TriggerContext {
+        BEFORE_INSERT, BEFORE_UPDATE, BEFORE_DELETE,
+        AFTER_INSERT, AFTER_UPDATE, AFTER_DELETE,
+        AFTER_UNDELETE
+    }
+    
+    // exception class
+    public class TriggerHandlerException extends Exception {}
+    public static Boolean isTriggerActive(String triggerName) {
+ 
+    ConfigurationSwitch__c config = ConfigurationSwitch__c.getInstance(UserInfo.getUserId()); 
+        if (config == null) 
+            return false;
+    Boolean isTriggerActive = (Boolean) config.get('TriggerEnabled__c');							
+    Boolean isAllTriggersActive = (Boolean) config.get('TriggerEnabled__c');
+    isTriggerActive = isAllTriggersActive && (isTriggerActive == null ? true : isTriggerActive);
+
+    return isTriggerActive;
+}
+}
+======================================================================
+***VIRTUAL CLASS EXTENDED TRIGGERHANDLERS***
+
+public virtual class ContentDocumentLinkTriggerHandler extends TriggerHandler{
+	
+    	private List<ContentDocumentLink> contentLinks;
+
+    	public ContentDocumentLinkTriggerHandler(List<ContentDocumentLink> contentLinks) {
+        this.contentLinks = contentLinks;
+        
+    }
+        public override void afterInsert() {
+        if (isTriggerEnabled()) {
+        contentDocLink(this.contentLinks);
+           
+    }
+    }
+        public override void afterUpdate() {
+        if (isTriggerEnabled()) {
+        contentDocLink(this.contentLinks); 
+    }
+    }
+        
+        
+    public static Boolean isTriggerEnabled() {
+        ConfigurationSwitch__c userSetting = ConfigurationSwitch__c.getInstance(UserInfo.getUserId());
+        ConfigurationSwitch__c orgDefault = ConfigurationSwitch__c.getOrgDefaults();
+        
+
+        if (userSetting != null && userSetting.TriggerEnabled__c != null) {  
+            return userSetting.TriggerEnabled__c;							
+        }
+
+        if (orgDefault != null && orgDefault.TriggerEnabled__c != null) {
+            return orgDefault.TriggerEnabled__c;
+        }
+
+        return true;
+    }
+
+    	public static void contentDocLink(List<ContentDocumentLink> content) {
+        Map<Id, Id> contentdocIdMap = new Map<Id, Id>();
+       
+
+        for (ContentDocumentLink link : content) {
+            contentdocIdMap.put(link.ContentDocumentId, link.LinkedEntityId);
+  
+        }
+
+        List<ContentVersion> ver = [
+            SELECT Id, ContentDocumentId, FileType, Title 
+            FROM ContentVersion 
+            WHERE ContentDocumentId IN :contentdocIdMap.keySet() 
+            AND IsLatest = TRUE
+        ];
+
+        List<ContentDistribution> distribution = new List<ContentDistribution>();
+
+        for (ContentVersion cv : ver) {
+            if (cv.FileType == 'JPG' || cv.FileType == 'PNG') {
+                ContentDistribution d = new ContentDistribution();
+                d.Name = 'Generate Public Link';
+                d.ContentVersionId = cv.Id;
+                d.PreferencesAllowOriginalDownload = true;
+                d.PreferencesLinkLatestVersion = true;
+                d.PreferencesAllowViewInBrowser = true;
+                distribution.add(d);
+                
+            }
+        }
+
+        if (!distribution.isEmpty()) {
+            try {
+                insert distribution;
+
+                List<ContentDistribution> publicLinks = [
+                    SELECT Id, DistributionPublicUrl, RelatedRecordId 
+                    FROM ContentDistribution 
+                    WHERE Id IN :distribution
+                ];
+
+                for (ContentDistribution d : publicLinks) {
+                    System.debug('Public Link for File uploaded: ' + d.DistributionPublicUrl);
+                }
+            } catch (Exception ex) {
+                System.debug('Error occurred: ' + ex.getMessage());
+            }
+        }
+    }
+}
+======================================================================
+TEST CLASS
+@isTest 
+private class ContentDocumentLinkTestClass { 
+    
+    @isTest
+    static void testContentDocumentLinkTriggerHandler() {
+        	ConfigurationSwitch__c orgSetting = new ConfigurationSwitch__c(
+            SetupOwnerId = UserInfo.getOrganizationId(),
+            TriggerEnabled__c = true
+        );
+        insert orgSetting;
+        
+        Case testCase = TestFactory.getCase();
+        ContentVersion testVersion = TestFactory.getContentVersion();
+		
+        testVersion = [SELECT Id, ContentDocumentId FROM ContentVersion WHERE Id = :testVersion.Id];
+		
+        ContentDocumentLink cdl = new ContentDocumentLink();
+        cdl.LinkedEntityId = testCase.Id;
+        cdl.ContentDocumentId = testVersion.ContentDocumentId;
+        cdl.Visibility = 'AllUsers';
+        cdl.ShareType = 'V';
+
+        Test.startTest();
+        insert cdl; // Triggers afterInsert logic
+        
+        Test.stopTest();
+
+        List<ContentDistribution> dists = [
+            SELECT Id, DistributionPublicUrl
+            FROM ContentDistribution
+            WHERE ContentVersionId = :testVersion.Id
+        ];
+        System.assertEquals(1, dists.size());
+        System.assertNotEquals(null, dists[0].DistributionPublicUrl);
+    }
+    @isTest
+    static void testAfterUpdate_ContentDocumentLink() {
+        ConfigurationSwitch__c orgSetting = new ConfigurationSwitch__c(
+            SetupOwnerId = UserInfo.getOrganizationId(),
+            TriggerEnabled__c = true
+        );
+        insert orgSetting;
+
+        // Create required records
+        Case testCase = TestFactory.getCase();
+        ContentVersion testVersion = TestFactory.getContentVersion();
+
+        Id contentDocId = [
+            SELECT ContentDocumentId 
+            FROM ContentVersion 
+            WHERE Id = :testVersion.Id 
+            LIMIT 1
+        ].ContentDocumentId;
+
+        // Insert ContentDocumentLink
+        ContentDocumentLink cdl = new ContentDocumentLink(
+            LinkedEntityId = testCase.Id,
+            ContentDocumentId = contentDocId,
+            ShareType = 'V',
+            Visibility = 'AllUsers'
+        );
+        insert cdl;
+
+        // Update the record to invoke afterUpdate
+        Test.startTest();
+        cdl.Visibility = 'AllUsers';
+        update cdl;
+        Test.stopTest();
+
+        ContentDocumentLink updatedCDL = [SELECT Visibility FROM ContentDocumentLink WHERE Id = :cdl.Id];
+        System.assertEquals('AllUsers', updatedCDL.Visibility);
+    }
+
+    @isTest
+    static void testTriggerBypassLogic() {
+        // Use a mock subclass to override setTriggerContext
+        TestContentDocHandler handler = new TestContentDocHandler();
+        TriggerHandler.bypass('TestContentDocHandler');
+
+        Test.startTest();
+        handler.run(); // Should skip logic due to bypass
+        Test.stopTest();
+
+        System.assertEquals(true, TriggerHandler.isBypassed('TestContentDocHandler'));
+        TriggerHandler.clearBypass('TestContentDocHandler');
+        System.assertEquals(false, TriggerHandler.isBypassed('TestContentDocHandler'));
+    }
+	
+    @isTest
+    static void testTriggerHandlerLoopControl() {
+        TestContentDocHandler handler = new TestContentDocHandler();
+        handler.setMaxLoopCount(1);
+
+        Test.startTest();
+        handler.run(); // First run is fine
+        Boolean errorThrown = false;
+        try {
+            handler.run(); // Should exceed and throw
+        } catch (Exception e) {
+            errorThrown = true;
+        }
+        Test.stopTest();
+
+        System.assertEquals(true, errorThrown, 'Exception should be thrown on loop limit');
+    }
+
+    @isTest
+    static void testTriggerHandlerContextBranches() {
+        TestContentDocHandler handler = new TestContentDocHandler();
+        handler.setTriggerContext('before insert', true); // mock context
+    }
+
+    // Subclass to allow test-mode context control
+    public class TestContentDocHandler extends ContentDocumentLinkTriggerHandler {
+        public TestContentDocHandler() {
+            super(new List<ContentDocumentLink>());
+            this.setTriggerContext('after insert', true);
+            this.run();// simulate trigger context
+        }
+    }
+}
+======================================================================
+TEST FACTORY
+
+@isTest
+public class TestFactory {
+    
+    public static case getCase(){
+        case cs=new Case();  
+        cs.Status='New'; 
+        cs.Origin='Web'; 
+        cs.Subject='test case'; 
+        insert cs; 
+        return cs;
+    }
+    	public static ContentVersion getContentVersion(){
+      	ContentVersion conver = new ContentVersion(); 
+        conver.Title = 'Test File'; 
+        conver.PathOnClient = 'test.JPG'; 
+        conver.IsMajorVersion = true; 
+        conver.VersionData = Blob.valueOf('This is sample content'); 
+        insert conver;
+        return conver;
+        }
+    	public static Account getAccount(string name){
+        Account a=new Account();
+        a.Name=name;
+        a.Website='https://example.com';
+        insert a;
+        return a;
+    }
+    public static Contact getContact(string fname, string lname, Id accid){
+        Account a=getAccount('testAccount');
+        contact c=new contact();
+        c.AccountId=a.Id;
+        c.FirstName=fname;
+        c.LastName=lname;
+        insert c;
+        return c;
+    }
+    public static Opportunity getOpportunity(String name, Id accountId) {
+        return new Opportunity(
+        Name = name,
+        StageName = 'Prospecting',
+        CloseDate = System.today().addDays(7),
+        AccountId = accountId
+    );
+    }
+        public static List<Account> getTwoAccounts() {
+        Account acc1 = new Account(Name = 'Account 1', Website = 'https://example.com');
+        Account acc2 = new Account(Name = 'Account 2', Website = 'https://example.com');
+        insert new List<Account>{acc1, acc2};
+        return new List<Account>{acc1, acc2};
+    }
+}
